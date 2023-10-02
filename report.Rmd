@@ -1,0 +1,153 @@
+---
+title: "Trip Purchases with Double Q-learning"
+author: "Matt DiNardo - Data Scientist Interview"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r helper_functions}
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+# Introduction  
+
+For this problem, an agent faces a sequential decision-making process in deciding whether to
+buy a ticket for a trip today or wait for a lower price later. The goal is
+to learn an optimal policy for the task. One approach 
+proposed by Groves & Gini (2011) could be to create a supervised learning system that uses
+features of the current state to predict the lowest future price of the trip, recommend
+```BUY``` if the current best price is within some acceptable range of the forecasted minimum price,
+and recommend ```WAIT``` otherwise.[^1] However, a supervised learning approach like this neglects the sequential 
+structure of the problem. Sutton (1988) describes how temporal-difference learning methods make more efficient use of 
+their experience, converge faster, and produce better policies for problems with sequential structures.[^2]
+
+# Methodology 
+
+The TD/reinforcement learning method used in this experiment is a variation of Q-learning
+called Double Q-learning proposed by Silver et al. (2015).[^3] Its main differences from normal Q-learning
+are the replacement of a tabular Q function with a function approximator, its use of experience replay to de-correlate
+samples during training, and use of a double estimator.  
+
+Training a DQ-Network on *\<state, action, reward\>* representations aggregated from the ```boscun``` data set results
+in learning a policy with an average out-of-sample cumulative reward of about $73 per trip. 
+
+# Rewards  
+
+The agent faces a Markov Decision Process: given state $s$, select action $a \in \{BUY, WAIT\}$ that maximizes the expected sum of *discounted*
+future rewards. Here, the reward is constructed as the daily return on ```WAIT```, calculated 
+as $minprice_t - minprice_{t+1}$. If ```BUY``` is selected, the episode terminates with reward 0.  
+
+There are important considerations that can be addressed by this reinforcement learning approach:
+
+- *discount factor*: Future rewards (savings) should be discounted based on risk and time-value preference. The level of
+the discount rate may significantly alter the behavior of the policy learned by the agent, so the discount rate should be 
+somewhat representative of the preferences of users/customers.   
+- *transitions*: In the real world, giving a ```BUY``` recommendation is not a guarantee the user will follow the policy. 
+These concerns with stochastic transitions and rewards are automatically handled by Q-learning.  
+
+[^1]: [1] Gini, Groves. [A regression model for predicting optimal purchase timing for airline tickets.](https://www.cs.umn.edu/sites/cs.umn.edu/files/tech_reports/11-025.pdf) 2011  
+[^2]: [2] Sutton. [Learning to Predict by the Methods of Temporal Differences.](https://pdfs.semanticscholar.org/9c06/865e912788a6a51470724e087853d7269195.pdf)  1988  
+[^3]: [3] van Hasselt, Guez, Silver.  [Deep Reinforcement Learning with Double Q-learning](https://arxiv.org/pdf/1509.06461.pdf).  2015
+
+# Results  
+
+The DQN was trained using tensorflow with 864 unique trips, where each trip was a sequence of daily statistics describing itinerary prices for
+a trip on a given day. These features included *minimum price*, *mean price*, *days out*, *seats*, etc. and represented the *state*
+of the environment. The agent performance was monitored across 15,000 training episodes.
+
+### Training & Test Performance
+
+```{r warning=FALSE, message=FALSE, fig.height=3}
+library(ggplot2)
+library(forecast)
+library(ggthemes)
+library(dplyr)
+tr <- read.csv('results/boscun_agent.csv', header=FALSE)
+tr$reward_100_ma <- ma(tr$V2, order=500)
+tr$episode <- 1:nrow(tr)
+
+p1 <- ggplot(tr, aes(x = episode, y = reward_100_ma)) + geom_line() + 
+  theme_fivethirtyeight() + theme(axis.title = element_text(), title = element_text(size= 8)) + 
+  ylab('$') + ggtitle('(Train) Avg. Cum. Reward', 
+                      subtitle = 'In-Sample / Epsilon-Greedy Selection')
+
+#test_result_files <- list.files(path = './results/', pattern="*test*", full.names = TRUE)
+test_result_files <- sapply(c(0:(length(list.files(path='./results', include.dirs = FALSE))-4)),
+                              FUN=function(x) {
+                                paste('results/boscun_agent_test', x, '.csv', sep='')
+                              })
+test_result_files <- c(test_result_files, 'results/boscun_agent_testfinal.csv')
+test_results <- lapply(test_result_files, read.csv, header=FALSE)
+results <- data.frame(avg_r = sapply(test_results, FUN=function(x) mean(x$V2)),
+                      i = (1:length(test_results)))
+
+p2 <- ggplot(results, aes(x = i*100, y = avg_r)) + geom_line() + 
+  theme_fivethirtyeight() + theme(axis.title = element_text(), title = element_text(size= 8)) + xlab('episode') +
+  ylab('$') + ggtitle('(Test) Avg. Cum. Reward',
+                      subtitle = 'Out-of-Sample / Greedy Selection')
+
+final_results <- test_results[[length(test_results)]]
+rewards_test <- read.csv('output/rewards_test.csv')
+final_results$type <- 'Final Policy Rewards'
+rewards_test$type <- 'Random Policy Rewards'
+colnames(final_results)[2] <- 'daily_return'
+res <- rbind(final_results %>% select(daily_return, type),
+             rewards_test %>% select(daily_return, type))
+res$type <- factor(res$type, levels=c('Random Policy Rewards', 'Final Policy Rewards'))
+multiplot(p1, p2, cols=2)
+```
+
+```{r fig.height = 3, fig.width=6, warning=FALSE}
+ggplot(res %>% filter(daily_return < 500 & daily_return > -100), 
+       aes(x = type, y = daily_return, fill = type)) + geom_boxplot() + theme_fivethirtyeight() + 
+  guides(fill=FALSE) + theme(axis.title = element_text()) + ylab('Rewards ($)') +
+  ggtitle('Distribution of Rewards for Final Policy') + xlab(NULL) + theme(title = element_text(size=8))
+```
+
+# Conclusion and Remaining Issues
+
+The agent successfully learns to time trip purchase with an average savings of about $73, more than enough to buy
+some extra jumbo margaritas in Cancun. Reinforcement Learning provides promising methods for solving this problem, but
+potential issues remain:
+
+- Testing generalization across different origins/destinations    
+- Non-stationarity of rewards / Responsiveness to changes in market conditions  
+- Training stability of function approximator (neural network) in online setting  
+- **Improving state representation with better features & aggregation methods**
